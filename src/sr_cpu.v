@@ -277,7 +277,8 @@ module sr_control
     always @ (*) begin
         casez ({Ins_buff[rs2_bypass_index], Ins_buff[rs1_bypass_index]})
             {LUI, LUI}: begin
-                lui_bypass = {rs2_bypass,rs1_bypass}; 
+                lui_bypass = {rs2_bypass,rs1_bypass};
+                alu_bypass = 2'b00; 
             end
             {LUI, 3'bZ}: begin
                 alu_bypass = {1'b0, rs1_bypass};
