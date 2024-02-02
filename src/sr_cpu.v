@@ -41,14 +41,15 @@ module sr_cpu
     wire [31:0] immB;
     wire [31:0] immU;
     reg  [31:0] immU_pipe [0:1];
-    wire [1:0] bypass;
+    wire [1:0] alu_bypass, lui_bypass;
     wire [1:0] bypass_index;
+    wire stall;
 
     //program counter
     wire [31:0] pc;
     wire [31:0] pcBranch = pc + immB;
     wire [31:0] pcPlus4  = pc + 4;
-    wire [31:0] pcNext   = pcSrc ? pcBranch : pcPlus4;
+    wire [31:0] pcNext   = stall ? pc : pcSrc ? pcBranch : pcPlus4;
     sm_register r_pc(clk ,rst_n, pcNext, pc);
 
     //program memory access
@@ -96,13 +97,13 @@ module sr_cpu
     wire [31:0] aluResult;
 
     sr_alu alu (
-        .srcA       ( rd1          ),
-        .srcB       ( srcB         ),
+        .srcA       ( lui_bypass[0] ? immU_pipe[bypass_index[0]] : rd1),
+        .srcB       ( lui_bypass[1] ? immU_pipe[bypass_index[1]] : srcB),
         .oper       ( aluControl   ),
         .zero       ( aluZero      ),
         .result     ( aluResult    ),
         .clk        (clk           ),
-        .bypass     (bypass        ),
+        .bypass     (alu_bypass    ),
         .bypass_index(bypass_index ) 
     );
 
@@ -117,7 +118,7 @@ module sr_cpu
     end
 
     always @ (posedge clk) begin
-        regWrite_pipe[0] <= regWrite;
+        regWrite_pipe[0] <= ~stall & regWrite;
         regWrite_pipe[1] <= regWrite_pipe[0];
     end
 
@@ -142,8 +143,10 @@ module sr_cpu
         .rs1        ( rs1  ),
         .rs2        ( rs2  ),
         .clk        ( clk  ),
-        .bypass     ( bypass  ),
-        .bypass_index(bypass_index  )
+        .alu_bypass ( alu_bypass  ),
+        .lui_bypass ( lui_bypass  ),
+        .bypass_index(bypass_index  ),
+        .stall      (stall)
     );
 
 endmodule
@@ -201,8 +204,10 @@ module sr_control
     input     [ 4:0] rs1,
     input     [ 4:0] rs2,
     input            clk,
-    output     [1:0] bypass,
+    output reg [1:0] alu_bypass,
+    output reg [1:0] lui_bypass,
     output     [1:0] bypass_index,
+    output           stall,
     output           pcSrc, 
     output reg       regWrite, 
     output reg       aluSrc,
@@ -214,16 +219,41 @@ module sr_control
     assign pcSrc = branch & (aluZero == condZero);
     
     reg [4:0] rd_buff [1:0];
+    reg [2:0] Ins_buff [1:0];
+    
+    reg [1:0] currIns;
+    localparam DEF = 'b00,
+                MUL = 'b01,
+                LUI = 'b10,
+                STALL = 'b11;
+    
     
     reg rs1_bypass, rs2_bypass;
     reg rs1_bypass_index, rs2_bypass_index;
-    assign bypass = {rs2_bypass,rs1_bypass};
     assign bypass_index = {rs2_bypass_index,rs1_bypass_index};
 
     always @ (posedge clk) begin
         rd_buff[0] <= rd;
         rd_buff[1] <= rd_buff[0];
     end
+
+    always @ (posedge clk) begin
+        if (stall)
+            Ins_buff[0] <= STALL;
+        else
+            Ins_buff[0] <= currIns;
+        Ins_buff[1] <= Ins_buff[0];
+    end
+
+    always @ (*) begin
+        casez( {cmdF7, cmdF3, cmdOp} )
+            { `RVF7_MUL,  `RVF3_MUL,  `RVOP_MUL  } : currIns = MUL;
+            { `RVF7_ANY,  `RVF3_ANY,  `RVOP_LUI  } : currIns = LUI;
+            default                                : currIns = DEF;
+        endcase
+    end
+
+    assign stall = (Ins_buff[0] == MUL) & ((rs1_bypass & rs1_bypass_index == 0) | (rs2_bypass & rs2_bypass_index == 0));
 
     always @ (*) begin
         rs1_bypass = 0;
@@ -233,15 +263,35 @@ module sr_control
 
         if (rd_buff[0] == rs1 || rd_buff[1] == rs1) begin
             rs1_bypass = 1;
-            if (rd_buff[1] == rs1 && rd_buff[0] != rs1 )
+            if (rd_buff[1] == rs1 && (rd_buff[0] != rs1 | Ins_buff[0] == STALL))
                 rs1_bypass_index = 1;
         end
 
         if (rd_buff[0] == rs2 || rd_buff[1] == rs2) begin
             rs2_bypass = 1;
-            if (rd_buff[1] == rs2 && rd_buff[0] != rs2 )
+            if (rd_buff[1] == rs2 && (rd_buff[0] != rs2 | Ins_buff[0] == STALL))
                 rs2_bypass_index = 1;
         end
+    end
+
+    always @ (*) begin
+        casez ({Ins_buff[rs2_bypass_index], Ins_buff[rs1_bypass_index]})
+            {LUI, LUI}: begin
+                lui_bypass = {rs2_bypass,rs1_bypass}; 
+            end
+            {LUI, 3'bZ}: begin
+                alu_bypass = {1'b0, rs1_bypass};
+                lui_bypass = {rs2_bypass, 1'b0};
+            end
+            {3'bZ, LUI}: begin
+                alu_bypass = {rs2_bypass, 1'b0};
+                lui_bypass = {1'b0, rs1_bypass};
+            end
+            default: begin
+                alu_bypass = {rs2_bypass, rs1_bypass};
+                lui_bypass = 2'b00;
+            end
+        endcase
     end
 
 
@@ -278,18 +328,19 @@ module sr_alu
     input         clk,
     input  [1:0]  bypass,
     input  [1:0]  bypass_index,
+ //   input         in_valid,
+ //   output reg    out_valid,
     output        zero,
     output reg [31:0] result
 );
     reg [31:0] sub;
     wire [31:0] multiplier_out;
+    wire multiplier_out_valid;
     reg [2:0] oper_pipe [0:1];
     reg [31:0] result_pipe [0:1];
+//    reg        valid_pipe [0:1];
     reg [31:0] result_comb;
-    wire [31:0] srcA_mux, srcB_mux;
-
-    assign srcA_mux = bypass[0]? result_pipe[bypass_index[0]] : srcA;
-    assign srcB_mux = bypass[1]? result_pipe[bypass_index[1]] : srcB;
+    reg [31:0] srcA_mux, srcB_mux;
 
     always @ (posedge clk) begin
         oper_pipe[0] <= oper;
@@ -299,6 +350,27 @@ module sr_alu
     always @ (posedge clk) begin
         result_pipe[0] <= result_comb;
         result_pipe[1] <= result_pipe[0];
+    end
+
+    // always @ (posedge clk) begin
+    //     valid_pipe[0] <= in_valid;
+    //     valid_pipe[1] <= valid_pipe[0];
+    // end    
+    always @ (*) begin
+        srcA_mux = srcA;
+        srcB_mux = srcB;
+        if (bypass[0]) begin
+            if (bypass_index[0] == 1 && oper_pipe[1] == `ALU_MUL)
+                srcA_mux = multiplier_out;
+            else
+                srcA_mux = result_pipe[bypass_index[0]];
+        end
+        if (bypass[1]) begin
+            if (bypass_index[1] == 1 && oper_pipe[1] == `ALU_MUL)
+                srcB_mux = multiplier_out;
+            else
+                srcB_mux = result_pipe[bypass_index[1]];
+        end
     end
 
     always @ (*) begin
@@ -319,36 +391,47 @@ module sr_alu
         endcase
     end
 
-    assign zero   = (result_comb == 0);
+    // always @ (*) begin
+    //     case (oper_pipe[1])
+    //         default   : out_valid = valid_pipe[1];
+    //         `ALU_MUL : out_valid = multiplier_out_valid;
+    //     endcase
+    // end    
+
+    assign zero   = (result_comb == 0) ;//& in_valid;
     multiplier multiplier
     (
         .clk(clk),
-        .valid(oper==`ALU_MUL),
+        .in_valid(oper==`ALU_MUL),// & in_valid),
         .srcA(srcA_mux),
         .srcB(srcB_mux),
         .result(multiplier_out)
+        // .out_valid(multiplier_out_valid)
     );
 endmodule
 
 module multiplier
 (
     input clk,
-    input valid,
+    input in_valid,
     input signed [31:0] srcA,
     input signed [31:0] srcB,
     output [31:0] result
+    //output out_valid
 );
-    reg [63:0] pipeline1, pipeline2;
+    reg [63:0] pipeline [0:1];
     reg valid_pipe;
-    assign result = pipeline2[31:0];
+    assign result = pipeline[1][31:0];
+    //assign out_valid = valid_pipe[1];
 
     always @ (posedge clk) begin
-        valid_pipe <= valid;
-        if (valid)
-            pipeline1 <= srcA*srcB;
+        valid_pipe <= in_valid;
+        //valid_pipe[1] <= valid_pipe[0];
+        if (in_valid)
+            pipeline[0] <= srcA*srcB;
         
         if (valid_pipe)
-            pipeline2 <= pipeline1;
+            pipeline[1] <= pipeline[0];
     end 
 
 endmodule

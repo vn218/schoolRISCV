@@ -12,4 +12,5 @@ fibonacci:  add   t0, t0, t1
             add   t1, t0, t1
             mv    a0, t1
             mul   a0, a0, t1
+            mul   a0, a0, t1
             beqz  zero,  fibonacci

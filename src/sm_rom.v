@@ -20,7 +20,8 @@ module sm_rom
     assign rd = rom [a];
 
     initial begin
-        $readmemh ("program.hex", rom);
+        //$readmemh ("../program/01_fibonacci/program.hex", rom);
+        $readmemh ("program2.hex", rom);
     end
 
 endmodule
