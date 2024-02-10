@@ -143,6 +143,7 @@ module sr_cpu
         .rs1        ( rs1  ),
         .rs2        ( rs2  ),
         .clk        ( clk  ),
+        .rst_n      ( rst_n ),
         .alu_bypass ( alu_bypass  ),
         .lui_bypass ( lui_bypass  ),
         .bypass_index(bypass_index  ),
@@ -204,6 +205,7 @@ module sr_control
     input     [ 4:0] rs1,
     input     [ 4:0] rs2,
     input            clk,
+    input            rst_n,
     output reg [1:0] alu_bypass,
     output reg [1:0] lui_bypass,
     output     [1:0] bypass_index,
@@ -238,11 +240,15 @@ module sr_control
     end
 
     always @ (posedge clk) begin
-        if (stall)
+        if (stall | !rst_n)
             Ins_buff[0] <= STALL;
         else
             Ins_buff[0] <= currIns;
-        Ins_buff[1] <= Ins_buff[0];
+        
+        if (!rst_n)
+            Ins_buff[1] <= STALL;
+        else    
+            Ins_buff[1] <= Ins_buff[0];
     end
 
     always @ (*) begin
@@ -261,13 +267,13 @@ module sr_control
         rs1_bypass_index = 0;
         rs2_bypass_index = 0;        
 
-        if (rd_buff[0] == rs1 || rd_buff[1] == rs1) begin
+        if ((rd_buff[0] == rs1 && Ins_buff[0] != STALL) || (rd_buff[1] == rs1 && Ins_buff[1] != STALL)) begin
             rs1_bypass = 1;
             if (rd_buff[1] == rs1 && (rd_buff[0] != rs1 | Ins_buff[0] == STALL))
                 rs1_bypass_index = 1;
         end
 
-        if (rd_buff[0] == rs2 || rd_buff[1] == rs2) begin
+        if ((rd_buff[0] == rs2 && Ins_buff[0] != STALL) || (rd_buff[1] == rs2 && Ins_buff[1] != STALL)) begin
             rs2_bypass = 1;
             if (rd_buff[1] == rs2 && (rd_buff[0] != rs2 | Ins_buff[0] == STALL))
                 rs2_bypass_index = 1;
