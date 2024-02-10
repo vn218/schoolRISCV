@@ -426,9 +426,9 @@ module multiplier
     output [31:0] result
     //output out_valid
 );
-    reg [63:0] pipeline [0:1];
+    reg [31:0] pipeline [0:1];
     reg valid_pipe;
-    assign result = pipeline[1][31:0];
+    assign result = pipeline[1];
     //assign out_valid = valid_pipe[1];
 
     always @ (posedge clk) begin
